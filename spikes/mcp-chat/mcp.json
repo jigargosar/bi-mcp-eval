@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "chat": {
+      "command": "bun",
+      "args": ["run", "mcp-chat.ts"],
+      "env": { "SESSION_ID": "${CLAUDE_SESSION_ID}" }
+    }
+  }
+}
