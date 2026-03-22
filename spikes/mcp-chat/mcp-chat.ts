@@ -1,25 +1,25 @@
+const VERSION = "0.0.5";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { spawn } from "child_process";
-import { dirname, join } from "path";
-import { fileURLToPath } from "url";
+import { appendFileSync } from "fs";
 
+const LOG_FILE = `C:/Users/jigar/projects/bi-mcp-eval/spikes/mcp-chat/mcp-chat-${Date.now()}.log`;
 const RELAY_PORT = 3099;
 const SESSION_ID = process.env.SESSION_ID || crypto.randomUUID();
-const __dirname = dirname(fileURLToPath(import.meta.url));
+let peerIndex: number | null = null;
 
-// Try to spawn relay in detached mode — if port is taken, relay is already running
-function ensureRelay() {
-  const child = spawn("bun", ["run", join(__dirname, "relay.ts")], {
-    detached: true,
-    stdio: "ignore",
-  });
-  child.unref();
+function dump(label: string, data: unknown) {
+  const line = `[${new Date().toISOString()}] ${label}: ${JSON.stringify(data, null, 2)}\n`;
+  appendFileSync(LOG_FILE, line);
+  console.error(line.trim());
 }
+
+dump("STARTUP", { VERSION, SESSION_ID, logFile: LOG_FILE });
+dump("ALL_ENV_VARS", process.env);
 
 // Connect to relay SSE stream and push channel notifications
 function connectToRelay() {
@@ -31,7 +31,7 @@ function connectToRelay() {
       if (!res.ok || !res.body) {
         throw new Error(`Relay responded ${res.status}`);
       }
-      console.error(`Connected to relay as ${SESSION_ID}`);
+      dump("RELAY_CONNECTED", { SESSION_ID, url });
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -48,7 +48,13 @@ function connectToRelay() {
         for (const line of lines) {
           const match = line.match(/^data: (.+)$/m);
           if (match) {
-            const { from, text } = JSON.parse(match[1]);
+            const msg = JSON.parse(match[1]);
+            dump("SSE_MESSAGE", msg);
+            if (msg.type === "role") {
+              peerIndex = msg.peerIndex;
+              continue;
+            }
+            const { from, text } = msg;
             await mcp.notification({
               method: "notifications/claude/channel",
               params: {
@@ -59,8 +65,8 @@ function connectToRelay() {
           }
         }
       }
-    } catch {
-      // Relay not ready yet, retry
+    } catch (err) {
+      dump("RELAY_ERROR", { error: String(err) });
     }
 
     setTimeout(connect, 2000);
@@ -77,27 +83,51 @@ const mcp = new Server(
       experimental: { "claude/channel": {} },
     },
     instructions:
-      'Messages from other Claude sessions arrive as <channel source="chat">.',
+      'Messages from other Claude sessions arrive as <channel source="chat">. On connect you receive a peerIndex (0=leader, 1+=follower). Leader initiates, followers defer.',
   }
 );
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: "send_message",
-      description: "Send a message to all other connected Claude sessions",
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          text: { type: "string", description: "Message to send" },
+mcp.setRequestHandler(ListToolsRequestSchema, async (request, extra) => {
+  dump("LIST_TOOLS_REQUEST", request);
+  dump("LIST_TOOLS_EXTRA", extra);
+  return {
+    tools: [
+      {
+        name: "send_message",
+        description: "Send a message to all other connected Claude sessions",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            text: { type: "string", description: "Message to send" },
+          },
+          required: ["text"],
         },
-        required: ["text"],
       },
-    },
-  ],
-}));
+      {
+        name: "get_role",
+        description: "Get this session's role (peerIndex 0=leader, 1+=follower) and session ID",
+        inputSchema: {
+          type: "object" as const,
+          properties: {},
+        },
+      },
+    ],
+  };
+});
 
-mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
+mcp.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  dump("CALL_TOOL_REQUEST", request);
+  dump("CALL_TOOL_EXTRA", extra);
+  if (request.params.name === "get_role") {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ sessionId: SESSION_ID, peerIndex, role: peerIndex === 0 ? "leader" : "follower" }),
+        },
+      ],
+    };
+  }
   if (request.params.name === "send_message") {
     const { text } = request.params.arguments as { text: string };
     const res = await fetch(`http://127.0.0.1:${RELAY_PORT}/send`, {
@@ -118,9 +148,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   throw new Error(`Unknown tool: ${request.params.name}`);
 });
 
-await mcp.connect(new StdioServerTransport());
+const transport = new StdioServerTransport();
+transport.onmessage = (msg: unknown) => {
+  dump("RAW_INCOMING_MESSAGE", msg);
+};
+await mcp.connect(transport);
 
-ensureRelay();
-setTimeout(connectToRelay, 1000);
+connectToRelay();
 
-console.error(`MCP chat server started (session: ${SESSION_ID})`);
+dump("MCP_SERVER_READY", { SESSION_ID });
