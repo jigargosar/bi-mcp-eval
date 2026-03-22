@@ -6,7 +6,7 @@ in real-time (read-only).
 
 ## Features
 
-- [ ] Message protocol — typed envelopes replacing raw text
-- [ ] Orchestrator — spawns claude processes with per-agent instructions
-- [ ] Viewer — read-only web page showing live conversation
+- [ ] Message protocol — add `name` field to messages
+- [ ] Orchestrator — script that starts relay, spawns claude processes with per-agent instructions
+- [ ] Viewer — read-only web page with two panels: raw dump (all JSON) and formatted log (human-readable)
 - [ ] Demo — example config that runs a multi-agent debate
