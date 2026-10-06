@@ -6,113 +6,70 @@ Run a script that spawns 2+ Claude agents with different instructions.
 They collaborate through the relay. A web page shows the conversation
 in real-time (read-only).
 
+## Architecture
+
+Single server process. No separate relay. No MCP channels.
+
+```
+server (long-running parent)
+├── claude agent "Alice" (child process, JSONL stdin/stdout)
+├── claude agent "Bob" (child process, JSONL stdin/stdout)
+└── viewer (web page served by server, SSE)
+```
+
 ## Roles
 
-### Orchestrator
+### Server
 
-Long-running parent process. The entry point.
+The single process that does everything.
 
-1. Starts relay as a child process
-2. Connects to relay as a peer (name: "orchestrator")
-3. Reads a task config — list of agents with names and instructions
-4. Spawns N claude CLI processes as child processes
-5. Holds all process handles — keeps everything alive
-6. On Ctrl+C — kills all child processes, exits
-
-### Relay
-
-SSE message broker. Stateless broadcast.
-
-1. Accepts SSE connections at /events?id=X&name=Y
-2. Assigns peer index on connect (0, 1, 2, ...)
-3. Sends role message on connect: { from, name, peerIndex }
-4. Broadcasts messages to all peers except sender
-5. Serves viewer HTML at /
+1. Spawns claude CLI processes in stream-json mode
+2. Communicates with each agent via stdin/stdout JSONL pipes
+3. Routes messages between agents
+4. Serves viewer web page
+5. Pushes messages to viewer via SSE
+6. Logs everything to logs/
+7. On Ctrl+C — kills all child processes, exits
 
 ### Agent
 
-A claude CLI process managed by the orchestrator.
+A claude CLI process in stream-json mode.
 
-1. Receives SESSION_ID and NAME via env vars from orchestrator
-2. MCP chat server connects to relay using those env vars
-3. Receives instructions from orchestrator via relay message
-4. Communicates with other agents via relay
-5. All sends and receives logged to logs/{name}.log
+1. Spawned by server with instructions
+2. Reads prompts from stdin (JSONL)
+3. Writes responses to stdout (JSONL)
+4. No direct connection to other agents — server routes everything
 
 ### Viewer
 
-Static HTML page served by relay. Read-only.
+Static HTML page served by server. Read-only.
 
-1. Connects to relay SSE stream as a peer
-2. Two panels:
+1. Two panels:
    a. Left: raw JSON dump of every message
    b. Right: formatted log — name, timestamp, content
+2. Connects to server via SSE for live updates
 3. No interaction — just watching
 
-## Message Format
+## Message Flow
 
-Every message carries all fields everywhere. No stripping.
-
-```json
-{
-  "from": "session-id",
-  "name": "Alice",
-  "text": "the actual content"
-}
-```
-
-On SSE connect, relay sends:
-
-```json
-{
-  "from": "session-id",
-  "name": "Alice",
-  "peerIndex": 0
-}
-```
-
-## Process Tree
-
-```
-orchestrator (parent)
-├── relay (child process)
-├── claude agent "Alice" (child process)
-├── claude agent "Bob" (child process)
-└── ... more agents
-```
-
-Viewer is not a process — it's a web page served by relay.
-
-## Task Config
-
-The orchestrator reads a config to know what to spawn:
-
-```json
-{
-  "task": "Debate whether tabs or spaces are better",
-  "agents": [
-    { "name": "Alice", "instructions": "Argue for tabs" },
-    { "name": "Bob", "instructions": "Argue for spaces" }
-  ]
-}
-```
-
-Format TBD — could be JSON, could be CLI args.
+1. Server sends prompt to Agent A via stdin
+2. Agent A responds via stdout (JSONL)
+3. Server reads response, logs it, forwards to:
+   a. Other agents (as stdin prompt)
+   b. Viewer (via SSE)
 
 ## Logging
 
 All logging goes to logs/ at project root.
 
-1. logs/relay.log — everything relay sends and receives
+1. logs/server.log — all messages routed, process lifecycle
 2. logs/{name}.log — per-agent, everything sent and received
-3. logs/orchestrator.log — process lifecycle events
 
 Full payloads logged. No filtering.
 
-## Open Questions
+## Build Order
 
-1. How to spawn claude CLI with per-agent instructions — need to verify
-   available flags (--system-prompt? --print? MCP instructions field?)
-2. How to configure MCP chat server per-agent — single shared .mcp.json
-   with env var substitution, or generated per-agent configs?
-3. Task config format — JSON file, CLI args, or something else?
+1. Server spawns one claude process, sends a prompt, reads response
+2. Add second agent, route messages between them
+3. Add viewer web page with SSE
+4. Add task config for defining agents and instructions
